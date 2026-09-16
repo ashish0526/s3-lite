@@ -72,8 +72,16 @@ func syncDir(dir string) error {
 // delete of something already gone is the state the caller wanted anyway.
 func removeFileAtomic(path string) error {
 	dir := filepath.Dir(path)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	err := os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	if os.IsNotExist(err) {
+		// Nothing was ever written under dir, so there is nothing dirty
+		// in its directory entry to flush — and dir itself may not exist.
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			return nil
+		}
 	}
 	return syncDir(dir)
 }
