@@ -31,6 +31,7 @@ type objectVersion struct {
 	Size      int64
 	Deleted   bool
 	ModTime   time.Time
+	Metadata  map[string]string
 }
 
 // objectMeta is a key's full version history, newest first.
@@ -105,13 +106,26 @@ func writeMeta(path string, m objectMeta) error {
 }
 
 // addVersion appends v (given a fresh VersionID) as the new newest version
-// of (bucket, key) and durably records it. Deliberate, temporary
-// simplification: read-modify-write of the whole metadata file is not
-// guarded by any lock, so two concurrent writers to the same key can race
-// and one version can silently overwrite the other's place in history
-// instead of both being recorded — see DESIGN.md (Chapter 7's conditional
-// PUT is the mechanism a real caller uses to avoid exactly this).
-func (s *Store) addVersion(bucket, key string, v objectVersion) (objectVersion, error) {
+// of (bucket, key) and durably records it. If precond is non-nil, it is
+// checked against the key's current latest version (and whether one exists
+// at all) inside the very same locked read-modify-write as the append —
+// that is what makes a conditional PUT (Chapter 7) an actual
+// compare-and-swap rather than a check that can go stale between "check"
+// and "act": s.mu serializes every addVersion/DeleteVersion call across the
+// whole Store, so two concurrent conditional writers to the same key are
+// never both evaluated against the same "current" state.
+//
+// Deliberate simplification: the lock is store-wide, not per-key — one
+// writer to key A blocks a concurrent writer to unrelated key B. Real S3
+// obviously doesn't serialize unrelated keys against each other; a per-key
+// lock (a map of mutexes, or sharding by key hash) would fix that without
+// changing the correctness argument at all. Documented in DESIGN.md as a
+// throughput cost accepted for a single-process "-lite" store, not a
+// correctness gap.
+func (s *Store) addVersion(bucket, key string, v objectVersion, precond func(current objectVersion, exists bool) error) (objectVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	mpath, err := s.metaPath(bucket, key)
 	if err != nil {
 		return objectVersion{}, err
@@ -119,6 +133,12 @@ func (s *Store) addVersion(bucket, key string, v objectVersion) (objectVersion, 
 	meta, err := readMeta(mpath)
 	if err != nil {
 		return objectVersion{}, err
+	}
+	if precond != nil {
+		cur, exists := meta.latest()
+		if err := precond(cur, exists); err != nil {
+			return objectVersion{}, err
+		}
 	}
 	v.VersionID = newVersionID()
 	meta.Versions = append([]objectVersion{v}, meta.Versions...)
@@ -136,6 +156,9 @@ func (s *Store) addVersion(bucket, key string, v objectVersion) (objectVersion, 
 // any other) might still point at the very same bytes, and this build has
 // no reference count to check — see DESIGN.md.
 func (s *Store) DeleteVersion(bucket, key, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	mpath, err := s.metaPath(bucket, key)
 	if err != nil {
 		return err

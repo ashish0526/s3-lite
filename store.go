@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -12,9 +13,10 @@ import (
 // error names; the HTTP layer (Chapter 3) maps these onto S3-shaped error
 // responses.
 var (
-	ErrNoSuchBucket   = errors.New("s3lite: no such bucket")
-	ErrNoSuchKey      = errors.New("s3lite: no such key")
-	ErrIsDeleteMarker = errors.New("s3lite: that version is a delete marker")
+	ErrNoSuchBucket       = errors.New("s3lite: no such bucket")
+	ErrNoSuchKey          = errors.New("s3lite: no such key")
+	ErrIsDeleteMarker     = errors.New("s3lite: that version is a delete marker")
+	ErrPreconditionFailed = errors.New("s3lite: precondition failed")
 )
 
 // Store is the blob layer. An object's bytes live in a content-addressed
@@ -26,6 +28,12 @@ var (
 // instead of overwriting bytes in place.
 type Store struct {
 	root string
+
+	// mu serializes every version-metadata read-modify-write (addVersion,
+	// DeleteVersion) so a conditional PUT's precondition check is atomic
+	// with its write. See addVersion's comment for the throughput
+	// trade-off this coarse-grained lock accepts.
+	mu sync.Mutex
 }
 
 // NewStore opens (creating if necessary) a blob store rooted at dir.
@@ -89,6 +97,8 @@ type ObjectInfo struct {
 	Size      int64
 	ETag      string
 	VersionID string
+	ModTime   time.Time
+	Metadata  map[string]string
 }
 
 // storeBlob writes r's bytes into the bucket's content-addressed blob
@@ -149,9 +159,38 @@ func (s *Store) storeBlob(bucket string, r io.Reader) (etag string, size int64, 
 	return etag, hr.Size(), nil
 }
 
-// Put writes an object's bytes as a new version. A key's history only ever
-// grows — nothing already on disk is overwritten or removed.
+// PutOptions carries what Put's simple three-argument form doesn't need:
+// user metadata, and the two conditional-write preconditions real S3
+// supports on PUT. IfMatch requires the key's current live ETag to equal
+// the given value; IfNoneMatch either forbids any current live version
+// (value "*", the "only create, never overwrite" case) or forbids one with
+// that exact ETag. A precondition failure returns ErrPreconditionFailed and
+// writes no new version — but see PutWithOptions for what "writes no new
+// version" does and doesn't mean here.
+type PutOptions struct {
+	Metadata    map[string]string
+	IfMatch     string
+	IfNoneMatch string
+}
+
+// Put writes an object's bytes as a new version, unconditionally. A key's
+// history only ever grows — nothing already on disk is overwritten or
+// removed.
 func (s *Store) Put(bucket, key string, r io.Reader) (PutResult, error) {
+	return s.PutWithOptions(bucket, key, r, PutOptions{})
+}
+
+// PutWithOptions is Put with metadata and/or a conditional-write check.
+// The precondition is evaluated in the same read-modify-write critical
+// section addVersion already uses to append the new version — that's what
+// makes this a real compare-and-swap against a concurrent writer instead
+// of a check that could go stale between "check" and "act". The one
+// exception: the blob itself (storeBlob) is written up front, before the
+// precondition is known, since S3 clients don't know their own body's
+// hash to condition on — a failed precondition leaves that blob written
+// but unreferenced by any version, which is fine because blobs are
+// content-addressed and inert until something's metadata points at them.
+func (s *Store) PutWithOptions(bucket, key string, r io.Reader, opts PutOptions) (PutResult, error) {
 	ok, err := s.bucketExists(bucket)
 	if err != nil {
 		return PutResult{}, err
@@ -166,7 +205,25 @@ func (s *Store) Put(bucket, key string, r io.Reader) (PutResult, error) {
 	if err != nil {
 		return PutResult{}, err
 	}
-	v, err := s.addVersion(bucket, key, objectVersion{ETag: etag, Size: size, ModTime: time.Now()})
+
+	var precond func(objectVersion, bool) error
+	if opts.IfMatch != "" || opts.IfNoneMatch != "" {
+		precond = func(cur objectVersion, exists bool) error {
+			live := exists && !cur.Deleted
+			if opts.IfMatch != "" && (!live || cur.ETag != opts.IfMatch) {
+				return ErrPreconditionFailed
+			}
+			if opts.IfNoneMatch == "*" && live {
+				return ErrPreconditionFailed
+			}
+			if opts.IfNoneMatch != "" && opts.IfNoneMatch != "*" && live && cur.ETag == opts.IfNoneMatch {
+				return ErrPreconditionFailed
+			}
+			return nil
+		}
+	}
+
+	v, err := s.addVersion(bucket, key, objectVersion{ETag: etag, Size: size, ModTime: time.Now(), Metadata: opts.Metadata}, precond)
 	if err != nil {
 		return PutResult{}, err
 	}
@@ -191,7 +248,7 @@ func (s *Store) Get(bucket, key, versionID string) (io.ReadCloser, ObjectInfo, e
 	if err != nil {
 		return nil, ObjectInfo{}, err
 	}
-	return f, ObjectInfo{Size: v.Size, ETag: v.ETag, VersionID: v.VersionID}, nil
+	return f, objectInfoFrom(v), nil
 }
 
 // Head reports a version's size and ETag without reading its bytes.
@@ -203,7 +260,11 @@ func (s *Store) Head(bucket, key, versionID string) (ObjectInfo, error) {
 	if v.Deleted {
 		return ObjectInfo{}, ErrIsDeleteMarker
 	}
-	return ObjectInfo{Size: v.Size, ETag: v.ETag, VersionID: v.VersionID}, nil
+	return objectInfoFrom(v), nil
+}
+
+func objectInfoFrom(v objectVersion) ObjectInfo {
+	return ObjectInfo{Size: v.Size, ETag: v.ETag, VersionID: v.VersionID, ModTime: v.ModTime, Metadata: v.Metadata}
 }
 
 // Delete appends a delete marker as the new latest version — it does not
@@ -213,7 +274,7 @@ func (s *Store) Head(bucket, key, versionID string) (ObjectInfo, error) {
 // a key that never existed gets a delete marker, since "hide this key"
 // is a well-defined operation whether or not it currently has content.
 func (s *Store) Delete(bucket, key string) (versionID string, err error) {
-	v, err := s.addVersion(bucket, key, objectVersion{Deleted: true, ModTime: time.Now()})
+	v, err := s.addVersion(bucket, key, objectVersion{Deleted: true, ModTime: time.Now()}, nil)
 	if err != nil {
 		return "", err
 	}

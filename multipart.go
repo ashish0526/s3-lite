@@ -206,7 +206,7 @@ func (s *Store) CompleteMultipartUpload(bucket, key, uploadID string, parts []Co
 		return PutResult{}, err
 	}
 
-	v, err := s.addVersion(bucket, key, objectVersion{ETag: etag, Size: total, ModTime: time.Now()})
+	v, err := s.addVersion(bucket, key, objectVersion{ETag: etag, Size: total, ModTime: time.Now()}, nil)
 	if err != nil {
 		return PutResult{}, err
 	}
