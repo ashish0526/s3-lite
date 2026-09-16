@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ErrNoSuchBucket and ErrNoSuchKey mirror S3's own error names; the HTTP
@@ -51,6 +52,14 @@ func (s *Store) objectPath(bucket, key string) (string, error) {
 	return filepath.Join(bdir, "objects", enc), nil
 }
 
+// etagPath is a sidecar file recording an object's ETag next to its bytes.
+// A deliberate, temporary simplification: the two files are written one
+// after the other, not as a single transaction, so a crash between them
+// can leave a stale or missing ETag next to fresh bytes. Chapter 6 replaces
+// this sidecar entirely with a proper per-key metadata file written as
+// part of a versioned write.
+func etagPath(objPath string) string { return objPath + ".etag" }
+
 // CreateBucket makes a bucket ready to hold objects. Creating an
 // already-existing bucket is not an error (idempotent, like S3's own
 // CreateBucket when you already own it).
@@ -77,21 +86,42 @@ func (s *Store) bucketExists(bucket string) (bool, error) {
 	return info.IsDir(), nil
 }
 
+// PutResult reports what actually landed on disk from a Put.
+type PutResult struct {
+	ETag string
+	Size int64
+}
+
+// ObjectInfo is what Head/Stat can tell you without reading an object's
+// bytes.
+type ObjectInfo struct {
+	Size int64
+	ETag string
+}
+
 // Put writes an object's bytes, replacing any existing bytes at that key
-// atomically (writeFileAtomic). Returns the number of bytes written.
-func (s *Store) Put(bucket, key string, r io.Reader) (int64, error) {
+// atomically (writeFileAtomic), and returns its content hash as an ETag.
+func (s *Store) Put(bucket, key string, r io.Reader) (PutResult, error) {
 	ok, err := s.bucketExists(bucket)
 	if err != nil {
-		return 0, err
+		return PutResult{}, err
 	}
 	if !ok {
-		return 0, ErrNoSuchBucket
+		return PutResult{}, ErrNoSuchBucket
 	}
 	path, err := s.objectPath(bucket, key)
 	if err != nil {
-		return 0, err
+		return PutResult{}, err
 	}
-	return writeFileAtomic(path, r)
+	hr := newHashingReader(r)
+	if _, err := writeFileAtomic(path, hr); err != nil {
+		return PutResult{}, err
+	}
+	etag := hr.ETag()
+	if _, err := writeFileAtomic(etagPath(path), strings.NewReader(etag)); err != nil {
+		return PutResult{}, err
+	}
+	return PutResult{ETag: etag, Size: hr.Size()}, nil
 }
 
 // Get opens an object for reading. The caller must Close it.
@@ -110,20 +140,24 @@ func (s *Store) Get(bucket, key string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-// Head reports an object's size without reading its bytes.
-func (s *Store) Head(bucket, key string) (size int64, err error) {
+// Head reports an object's size and ETag without reading its bytes.
+func (s *Store) Head(bucket, key string) (ObjectInfo, error) {
 	path, err := s.objectPath(bucket, key)
 	if err != nil {
-		return 0, err
+		return ObjectInfo{}, err
 	}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		return 0, ErrNoSuchKey
+		return ObjectInfo{}, ErrNoSuchKey
 	}
 	if err != nil {
-		return 0, err
+		return ObjectInfo{}, err
 	}
-	return info.Size(), nil
+	etag, err := os.ReadFile(etagPath(path))
+	if err != nil && !os.IsNotExist(err) {
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Size: info.Size(), ETag: string(etag)}, nil
 }
 
 // Delete removes an object. Deleting a key that does not exist is not an
@@ -131,6 +165,9 @@ func (s *Store) Head(bucket, key string) (size int64, err error) {
 func (s *Store) Delete(bucket, key string) error {
 	path, err := s.objectPath(bucket, key)
 	if err != nil {
+		return err
+	}
+	if err := removeFileAtomic(etagPath(path)); err != nil {
 		return err
 	}
 	return removeFileAtomic(path)
