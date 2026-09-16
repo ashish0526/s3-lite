@@ -55,6 +55,22 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	q := r.URL.Query()
+	switch {
+	case r.Method == http.MethodPost && q.Has("uploads"):
+		s.createMultipartUpload(w, bucket, key)
+		return
+	case r.Method == http.MethodPut && q.Has("uploadId") && q.Has("partNumber"):
+		s.uploadPart(w, r, bucket, key, q.Get("uploadId"), q.Get("partNumber"))
+		return
+	case r.Method == http.MethodPost && q.Has("uploadId"):
+		s.completeMultipartUpload(w, r, bucket, key, q.Get("uploadId"))
+		return
+	case r.Method == http.MethodDelete && q.Has("uploadId"):
+		s.abortMultipartUpload(w, bucket, key, q.Get("uploadId"))
+		return
+	}
+
 	switch r.Method {
 	case http.MethodPut:
 		s.putObject(w, r, bucket, key)
