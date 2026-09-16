@@ -49,6 +49,12 @@ func (s *Server) handleBucket(w http.ResponseWriter, r *http.Request, bucket str
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		if r.URL.Query().Has("list-type") {
+			s.listObjects(w, r, bucket)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "InvalidArgument", "GET on a bucket requires list-type=2.")
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Unsupported method for a bucket path.")
 	}
