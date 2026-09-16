@@ -128,6 +128,36 @@ func (s *Store) addVersion(bucket, key string, v objectVersion) (objectVersion, 
 	return v, nil
 }
 
+// DeleteVersion permanently erases one specific version's record from a
+// key's history — real S3's behavior for DELETE with an explicit version
+// ID, as opposed to Store.Delete's marker-only DELETE. The blob that
+// version pointed at is deliberately not garbage-collected here: because
+// blobs are content-addressed and shared, another version (of this key or
+// any other) might still point at the very same bytes, and this build has
+// no reference count to check — see DESIGN.md.
+func (s *Store) DeleteVersion(bucket, key, versionID string) error {
+	mpath, err := s.metaPath(bucket, key)
+	if err != nil {
+		return err
+	}
+	meta, err := readMeta(mpath)
+	if err != nil {
+		return err
+	}
+	idx := -1
+	for i, v := range meta.Versions {
+		if v.VersionID == versionID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrNoSuchKey
+	}
+	meta.Versions = append(meta.Versions[:idx], meta.Versions[idx+1:]...)
+	return writeMeta(mpath, meta)
+}
+
 // resolveVersion looks up one version of a key: the latest live (non
 // delete-marker) version when versionID is "", or a specific version by ID
 // otherwise (which CAN be a delete marker — the caller decides what that

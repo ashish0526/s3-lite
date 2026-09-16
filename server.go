@@ -81,11 +81,11 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 	case http.MethodPut:
 		s.putObject(w, r, bucket, key)
 	case http.MethodGet:
-		s.getObject(w, bucket, key)
+		s.getObject(w, r, bucket, key)
 	case http.MethodHead:
-		s.headObject(w, bucket, key)
+		s.headObject(w, r, bucket, key)
 	case http.MethodDelete:
-		s.deleteObject(w, bucket, key)
+		s.deleteObject(w, r, bucket, key)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Unsupported method for an object path.")
 	}
@@ -98,38 +98,63 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 		return
 	}
 	w.Header().Set("ETag", quoteETag(result.ETag))
+	w.Header().Set("x-amz-version-id", result.VersionID)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) getObject(w http.ResponseWriter, bucket, key string) {
-	rc, info, err := s.store.Get(bucket, key, "")
+func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	rc, info, err := s.store.Get(bucket, key, r.URL.Query().Get("versionId"))
 	if err != nil {
+		if err == ErrIsDeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
 		writeStoreError(w, err)
 		return
 	}
 	defer rc.Close()
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
+	w.Header().Set("x-amz-version-id", info.VersionID)
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, rc)
 }
 
-func (s *Server) headObject(w http.ResponseWriter, bucket, key string) {
-	info, err := s.store.Head(bucket, key, "")
+func (s *Server) headObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	info, err := s.store.Head(bucket, key, r.URL.Query().Get("versionId"))
 	if err != nil {
+		if err == ErrIsDeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
 		writeStoreError(w, err)
 		return
 	}
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
+	w.Header().Set("x-amz-version-id", info.VersionID)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (s *Server) deleteObject(w http.ResponseWriter, bucket, key string) {
-	if _, err := s.store.Delete(bucket, key); err != nil {
+// deleteObject mirrors real S3's two DELETE behaviors on a versioned key:
+// no ?versionId adds a delete marker as the new latest version (the bytes
+// stay, just hidden); an explicit ?versionId permanently erases that one
+// version's record.
+func (s *Server) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if versionID := r.URL.Query().Get("versionId"); versionID != "" {
+		if err := s.store.DeleteVersion(bucket, key, versionID); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.Header().Set("x-amz-version-id", versionID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	markerID, err := s.store.Delete(bucket, key)
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	w.Header().Set("x-amz-delete-marker", "true")
+	w.Header().Set("x-amz-version-id", markerID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
