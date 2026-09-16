@@ -33,6 +33,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NoSuchKey", "The specified key does not exist.")
 	case ErrInvalidKey:
 		writeError(w, http.StatusBadRequest, "InvalidArgument", "The specified key is not valid.")
+	case ErrPreconditionFailed:
+		writeError(w, http.StatusPreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold.")
 	case ErrIsDeleteMarker:
 		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against a delete marker.")
 	case ErrNoSuchUpload:

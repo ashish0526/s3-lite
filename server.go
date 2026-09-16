@@ -92,7 +92,12 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request, bucket, ke
 }
 
 func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	result, err := s.store.Put(bucket, key, r.Body)
+	opts := PutOptions{
+		Metadata:    extractMetadata(r.Header),
+		IfMatch:     unquoteETag(r.Header.Get("If-Match")),
+		IfNoneMatch: unquoteETag(r.Header.Get("If-None-Match")),
+	}
+	result, err := s.store.PutWithOptions(bucket, key, r.Body, opts)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -103,7 +108,8 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 }
 
 func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	rc, info, err := s.store.Get(bucket, key, r.URL.Query().Get("versionId"))
+	versionID := r.URL.Query().Get("versionId")
+	info, err := s.store.Head(bucket, key, versionID)
 	if err != nil {
 		if err == ErrIsDeleteMarker {
 			w.Header().Set("x-amz-delete-marker", "true")
@@ -111,10 +117,21 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 		writeStoreError(w, err)
 		return
 	}
+	if status, handled := checkReadConditions(r, info); handled {
+		w.Header().Set("ETag", quoteETag(info.ETag))
+		w.WriteHeader(status)
+		return
+	}
+	rc, _, err := s.store.Get(bucket, key, versionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	defer rc.Close()
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("x-amz-version-id", info.VersionID)
+	writeMetadataHeaders(w, info.Metadata)
 	w.WriteHeader(http.StatusOK)
 	io.Copy(w, rc)
 }
@@ -128,9 +145,15 @@ func (s *Server) headObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		writeStoreError(w, err)
 		return
 	}
+	if status, handled := checkReadConditions(r, info); handled {
+		w.Header().Set("ETag", quoteETag(info.ETag))
+		w.WriteHeader(status)
+		return
+	}
 	w.Header().Set("ETag", quoteETag(info.ETag))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	w.Header().Set("x-amz-version-id", info.VersionID)
+	writeMetadataHeaders(w, info.Metadata)
 	w.WriteHeader(http.StatusOK)
 }
 
