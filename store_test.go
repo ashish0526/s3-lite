@@ -24,11 +24,11 @@ func TestPutGetHeadDeleteRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if put.Size != 7 || put.ETag == "" {
-		t.Fatalf("PutResult = %+v, want Size=7 and a non-empty ETag", put)
+	if put.Size != 7 || put.ETag == "" || put.VersionID == "" {
+		t.Fatalf("PutResult = %+v, want Size=7, a non-empty ETag and VersionID", put)
 	}
 
-	info, err := s.Head("b", "a/b.txt")
+	info, err := s.Head("b", "a/b.txt", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,9 +39,12 @@ func TestPutGetHeadDeleteRoundTrip(t *testing.T) {
 		t.Fatalf("Head ETag %q != Put ETag %q", info.ETag, put.ETag)
 	}
 
-	rc, err := s.Get("b", "a/b.txt")
+	rc, getInfo, err := s.Get("b", "a/b.txt", "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if getInfo.VersionID != put.VersionID {
+		t.Fatalf("Get VersionID %q != Put VersionID %q", getInfo.VersionID, put.VersionID)
 	}
 	got, err := io.ReadAll(rc)
 	rc.Close()
@@ -52,10 +55,10 @@ func TestPutGetHeadDeleteRoundTrip(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 
-	if err := s.Delete("b", "a/b.txt"); err != nil {
+	if _, err := s.Delete("b", "a/b.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Get("b", "a/b.txt"); err != ErrNoSuchKey {
+	if _, _, err := s.Get("b", "a/b.txt", ""); err != ErrNoSuchKey {
 		t.Fatalf("Get after Delete = %v, want ErrNoSuchKey", err)
 	}
 }
@@ -72,10 +75,10 @@ func TestGetMissingKey(t *testing.T) {
 	if err := s.CreateBucket("b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Get("b", "missing"); err != ErrNoSuchKey {
+	if _, _, err := s.Get("b", "missing", ""); err != ErrNoSuchKey {
 		t.Fatalf("Get missing key = %v, want ErrNoSuchKey", err)
 	}
-	if _, err := s.Head("b", "missing"); err != ErrNoSuchKey {
+	if _, err := s.Head("b", "missing", ""); err != ErrNoSuchKey {
 		t.Fatalf("Head missing key = %v, want ErrNoSuchKey", err)
 	}
 }
@@ -85,7 +88,7 @@ func TestDeleteMissingKeyIsNotError(t *testing.T) {
 	if err := s.CreateBucket("b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Delete("b", "missing"); err != nil {
+	if _, err := s.Delete("b", "missing"); err != nil {
 		t.Fatalf("Delete of missing key should not error, got %v", err)
 	}
 }
@@ -134,10 +137,10 @@ func TestPutOverwrite(t *testing.T) {
 	if first.ETag == second.ETag {
 		t.Fatalf("ETag did not change across an overwrite with different content")
 	}
-	if info, err := s.Head("b", "k"); err != nil || info.ETag != second.ETag {
+	if info, err := s.Head("b", "k", ""); err != nil || info.ETag != second.ETag {
 		t.Fatalf("Head after overwrite = %+v, %v; want ETag %q", info, err, second.ETag)
 	}
-	rc, err := s.Get("b", "k")
+	rc, _, err := s.Get("b", "k", "")
 	if err != nil {
 		t.Fatal(err)
 	}

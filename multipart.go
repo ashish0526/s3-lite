@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -161,11 +162,6 @@ func (s *Store) CompleteMultipartUpload(bucket, key, uploadID string, parts []Co
 		}
 	}
 
-	objPath, err := s.objectPath(bucket, key)
-	if err != nil {
-		return PutResult{}, err
-	}
-
 	// The composite ETag only needs each part's digest bytes, never the
 	// part's actual content — so it's computed in one pass up front,
 	// independent of the (separate) byte-for-byte concatenation below.
@@ -192,19 +188,31 @@ func (s *Store) CompleteMultipartUpload(bucket, key, uploadID string, parts []Co
 		}
 		compositeHash.Write(digest)
 	}
+	etag := hex.EncodeToString(compositeHash.Sum(nil)) + "-" + strconv.Itoa(len(sorted))
 
-	total, err := writeFileAtomic(objPath, io.MultiReader(readers...))
+	// The assembled bytes still go through the same content-addressed blob
+	// store Put uses (Chapter 6) — just keyed by the composite ETag instead
+	// of one computed from the bytes themselves, since that's what real
+	// multipart-uploaded objects are addressed by.
+	bpath, err := s.blobPath(bucket, etag)
+	if err != nil {
+		return PutResult{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(bpath), 0o755); err != nil {
+		return PutResult{}, err
+	}
+	total, err := writeFileAtomic(bpath, io.MultiReader(readers...))
 	if err != nil {
 		return PutResult{}, err
 	}
 
-	etag := hex.EncodeToString(compositeHash.Sum(nil)) + "-" + strconv.Itoa(len(sorted))
-	if _, err := writeFileAtomic(etagPath(objPath), strings.NewReader(etag)); err != nil {
+	v, err := s.addVersion(bucket, key, objectVersion{ETag: etag, Size: total, ModTime: time.Now()})
+	if err != nil {
 		return PutResult{}, err
 	}
 	os.RemoveAll(dir) // scratch space only; no durability contract of its own
 
-	return PutResult{ETag: etag, Size: total}, nil
+	return PutResult{ETag: v.ETag, Size: v.Size, VersionID: v.VersionID}, nil
 }
 
 // AbortMultipartUpload discards an in-progress upload and its parts.

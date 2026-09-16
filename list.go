@@ -92,23 +92,26 @@ func (s *Store) List(bucket, prefix, delimiter, continuationToken string, maxKey
 			}
 			return err
 		}
-		if d.IsDir() || strings.HasSuffix(path, ".etag") {
+		if d.IsDir() || !strings.HasSuffix(path, ".meta.json") {
 			return nil
 		}
 		rel, err := filepath.Rel(objectsDir, path)
 		if err != nil {
 			return err
 		}
-		key, err := DecodeKey(rel)
+		key, err := DecodeKey(strings.TrimSuffix(rel, ".meta.json"))
 		if err != nil {
 			return err
 		}
-		info, err := d.Info()
+		meta, err := readMeta(path)
 		if err != nil {
 			return err
 		}
-		etag, _ := os.ReadFile(path + ".etag")
-		all = append(all, ObjectSummary{Key: key, Size: info.Size(), ETag: string(etag)})
+		v, ok := meta.latest()
+		if !ok || v.Deleted {
+			return nil // hidden behind a delete marker, or an empty history
+		}
+		all = append(all, ObjectSummary{Key: key, Size: v.Size, ETag: v.ETag})
 		return nil
 	})
 	if walkErr != nil {

@@ -40,7 +40,7 @@ func TestMultipartUploadRoundTrip(t *testing.T) {
 		t.Fatalf("composite ETag %q should be suffixed with the part count", result.ETag)
 	}
 
-	rc, err := s.Get("b", "big.bin")
+	rc, _, err := s.Get("b", "big.bin", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestMultipartUploadRoundTrip(t *testing.T) {
 		t.Fatalf("got %q, want parts concatenated in part-number order", got)
 	}
 
-	info, err := s.Head("b", "big.bin")
+	info, err := s.Head("b", "big.bin", "")
 	if err != nil {
 		t.Fatal(err)
 	}

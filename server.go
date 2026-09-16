@@ -102,12 +102,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 }
 
 func (s *Server) getObject(w http.ResponseWriter, bucket, key string) {
-	info, err := s.store.Head(bucket, key)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	rc, err := s.store.Get(bucket, key)
+	rc, info, err := s.store.Get(bucket, key, "")
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -120,7 +115,7 @@ func (s *Server) getObject(w http.ResponseWriter, bucket, key string) {
 }
 
 func (s *Server) headObject(w http.ResponseWriter, bucket, key string) {
-	info, err := s.store.Head(bucket, key)
+	info, err := s.store.Head(bucket, key, "")
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -131,7 +126,7 @@ func (s *Server) headObject(w http.ResponseWriter, bucket, key string) {
 }
 
 func (s *Server) deleteObject(w http.ResponseWriter, bucket, key string) {
-	if err := s.store.Delete(bucket, key); err != nil {
+	if _, err := s.store.Delete(bucket, key); err != nil {
 		writeStoreError(w, err)
 		return
 	}
